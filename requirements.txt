@@ -1,0 +1,15 @@
+# Training Pipeline
+torch
+torchvision 
+torchaudio --index-url https://download.pytorch.org/whl/cu124
+scikit-learn
+numpy
+matplotlib
+scipy
+tqdm
+h5py
+
+# Brainchip Library
+akida==2.19.1
+cnn2snn==2.19.1
+akida-models==1.14.0
