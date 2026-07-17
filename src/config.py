@@ -9,7 +9,7 @@ class PreprocessConfig:
     windows_neg_ratio: int = 1
     sleep_win_sec: int = 30
     bp_low_hz: float = 0.5
-    bp_high_hz: float = 40.0
+    bp_high_hz: float = 30.0
     notch_freq_hz: float = 60.0
     notch_q: float = 30.0
     hop_length: int = 50
@@ -25,11 +25,25 @@ class PreprocessConfig:
             (0.5, 4.0),   # Delta
             (4.0, 8.0),   # Theta
             (8.0, 12.0),  # Alpha
-            (12.0, 16.0), # Beta
-            (16.0, 30.0)  # Gamma
+            (12.0, 16.0), # Sigma
+            (16.0, 30.0)  # Beta
         ]
     )
+    band_names: list = field(
+        default_factory=lambda: ["delta", "theta", "alpha", "sigma", "beta"]
+    )
     clip_threshold: float = 200.0
+    # Ben's Spiker Algorithm (BSA) spike encoding parameters.
+    # BSA's firing rate is extremely sensitive to threshold (a knife-edge transition
+    # from ~0% to >50% within a ~0.01 range), and that transition point shifts with
+    # each band's FIR cutoff. A single shared threshold either silences the
+    # higher-frequency bands or saturates the lower ones, so each band gets its own
+    # threshold, calibrated (across several patients) to a comparable ~5-10% firing
+    # rate for delta/theta/alpha/sigma/beta respectively.
+    bsa_filter_order: int = 20
+    bsa_threshold: list = field(
+        default_factory=lambda: [0.865, 0.884, 0.894, 0.896, 0.898]
+    )
     all_channels = [
         "F3-M2",
         "F4-M1",

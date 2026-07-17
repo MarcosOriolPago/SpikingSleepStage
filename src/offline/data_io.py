@@ -25,9 +25,9 @@ def load_signals_and_annotations(
         stage_map = {
             'wake': 0,
             'nonrem1': 1, 
-            'nonrem2': 1,  # Merged N1/N2 into Light Sleep (1)
-            'nonrem3': 2,  # Deep Sleep (2)
-            'rem': 3       # REM (3)
+            'nonrem2': 2,  # Merged N1/N2 into Light Sleep (1)
+            'nonrem3': 3,  # Deep Sleep (2)
+            'rem': 4       # REM (3)
         }
         
         grp = f["data/sleep_stages"]

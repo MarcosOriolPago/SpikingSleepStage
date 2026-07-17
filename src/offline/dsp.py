@@ -1,14 +1,42 @@
+from unittest import signals
+
 import torch
 import numpy as np
-from scipy.signal import iirnotch, butter, sosfilt, lfilter, welch
+from scipy.signal import iirnotch, butter, sosfilt, sosfiltfilt, lfilter, welch
 
 from src.config import PreprocessConfig
 
 
-def clip_outliers(signals: np.ndarray, clip_threshold: float = 200.0) -> np.ndarray:
-    # Clip outliers based on a multiple of the standard deviation
+def clip_outliers(signals: np.ndarray, clip_threshold: float = 200.0, win_size: float = 10.0) -> np.ndarray:
     mean = np.mean(signals, axis=1, keepdims=True)
-    return np.clip(signals, mean - clip_threshold, mean + clip_threshold)
+    x = signals - mean
+    
+    # We will work channel by channel
+    out_signals = np.copy(x)
+    
+    for ch in range(x.shape[0]):
+        signal_ch = x[ch]
+        # Find everywhere the signal exceeds the threshold
+        is_outlier = np.abs(signal_ch) > clip_threshold
+        
+        if not np.any(is_outlier):
+            continue
+            
+        # To make it incredibly smooth, we apply a moving average filter 
+        # ONLY to the parts of the signal that exceeded the threshold.
+        # This rounds off any sharp corners perfectly.
+        clamped = np.clip(signal_ch, -clip_threshold, clip_threshold)
+        
+        kernel = np.hanning(win_size)
+        kernel /= kernel.sum()
+        
+        # Smooth the clamped signal
+        smoothed = np.convolve(clamped, kernel, mode='same')
+        
+        # Replace the hard-clipped areas with the smoothed version
+        out_signals[ch, is_outlier] = smoothed[is_outlier]
+        
+    return mean + out_signals
 
 
 def downsample_all(factor: int, *arrays: np.ndarray) -> tuple:
@@ -50,6 +78,45 @@ def apply_causal_filters(signals_raw: np.ndarray, cfg) -> np.ndarray:
         else:
             filtered_signals = filter_channel_causal(signals_raw, sos_bp, b_notch, a_notch)
         return filtered_signals
+
+
+def build_band_filters(bands: list[tuple[float, float]], fs: int, order: int = 4) -> list[np.ndarray]:
+    """Builds one zero-phase bandpass SOS filter per (low_hz, high_hz) band."""
+    nyq = fs / 2.0
+    sos_filters = []
+    for low_hz, high_hz in bands:
+        high_hz = min(high_hz, nyq * 0.98)
+        sos_filters.append(butter(order, [low_hz, high_hz], btype="bandpass", fs=fs, output="sos"))
+    return sos_filters
+
+
+def apply_band_filters(signals: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
+    """
+    Splits each channel into ``cfg.bands`` frequency bands using zero-phase
+    (non-causal) bandpass filtering (``sosfiltfilt``).
+
+    Meant to run on the already cleaned signal (clipped + downsampled) with the
+    causal filtering step skipped entirely, so every band signal is derived
+    straight from the raw recording rather than from an already band-limited one.
+
+    Args:
+        signals: (n_channels, n_samples)
+    Returns:
+        (n_channels, n_bands, n_samples) float32 array of band-filtered signals.
+    """
+    if signals.ndim == 1:
+        signals = signals[np.newaxis, :]
+
+    sos_filters = build_band_filters(cfg.bands, cfg.fs)
+    n_channels, n_samples = signals.shape
+    n_bands = len(sos_filters)
+
+    band_signals = np.empty((n_channels, n_bands, n_samples), dtype=np.float32)
+    for ch in range(n_channels):
+        for b, sos in enumerate(sos_filters):
+            band_signals[ch, b] = sosfiltfilt(sos, signals[ch]).astype(np.float32)
+
+    return band_signals
 
 
 def compute_psd(sig_win: np.ndarray, cfg: PreprocessConfig):
@@ -179,24 +246,17 @@ def compute_full_recording_bandpower(signals: np.ndarray, fs: int, n_fft: int = 
     }
     
     band_powers = []
-    for name, (low_hz, high_hz) in bands.items():
-        # The math automatically handles the new 256 grid perfectly
-        low_idx = max(int(low_hz / bin_res), 0)
-        high_idx = min(int(high_hz / bin_res) + 1, spec.shape[1])
-        
-        power = torch.sum(spec[:, low_idx:high_idx, :], dim=1)
-        power = torch.log1p(power)
-        band_powers.append(power)
-        
-    # Stack bands: (5, n_channels, total_time_steps)
-    stacked = torch.stack(band_powers, dim=0)
-    
-    # Permute to easily pull time steps: (total_time_steps, n_channels, 5)
-    stacked = stacked.permute(2, 0, 1) 
-    
-    # Flatten channels and bands: (total_time_steps, n_channels * 5)
-    # e.g., if 2 channels, features at step t will be [ch0_delta..ch0_beta, ch1_delta..ch1_beta]
-    total_time_steps = stacked.shape[0]
-    final_features = stacked.reshape(total_time_steps, -1)
-    
-    return final_features.cpu().numpy()
+    for chann in range(spec.shape[0]):
+        for name, (low_hz, high_hz) in bands.items():
+            # Calculate the corresponding FFT bin indices for the band
+            low_idx = max(int(low_hz / bin_res), 0)
+            high_idx = min(int(high_hz / bin_res) + 1, spec.shape[1])
+            
+            # Sum the power in the band and take log1p for numerical stability
+            power = torch.sum(spec[chann, low_idx:high_idx, :], dim=0)
+            power = torch.log1p(power)
+            band_powers.append(power)
+
+    # band_powers stacks to (n_channels * 5, total_time_steps); transpose so callers
+    # (windowing.py context helpers) get the documented (time, features) layout.
+    return torch.stack(band_powers).T.cpu().numpy()

@@ -10,18 +10,11 @@ def _get_historical_context(timeline: np.ndarray, target_samp: int, hop_length: 
     start_step = end_step - required_steps
     return timeline[start_step:end_step, :]
 
-def _get_doublet_context(timeline: np.ndarray, start_samp: int, win_samp: int, hop_length: int) -> np.ndarray:
-    """Slices and concatenates [Past, Current] blocks for real-time sleep stage context."""
-    c_start = start_samp // hop_length
-    c_end = (start_samp + win_samp) // hop_length
-    
-    p_start = (start_samp - win_samp) // hop_length
-    p_end = c_start
-    
-    return np.concatenate([
-        timeline[p_start:p_end, :],
-        timeline[c_start:c_end, :]
-    ], axis=1)
+def _get_signal_doublet(signals: np.ndarray, start_samp: int, win_samp: int) -> np.ndarray:
+    """Slices and concatenates [Past, Current] raw signal blocks along the time axis."""
+    past = signals[..., start_samp - win_samp:start_samp]
+    current = signals[..., start_samp:start_samp + win_samp]
+    return np.concatenate([past, current], axis=-1)
 
 def _merge_sleep_stage_masks(sleep_stages: dict) -> dict[int, np.ndarray]:
     """Combines string-based sleep stage masks into target integer classes."""
@@ -59,7 +52,13 @@ def extract_arousal_windows(
     n_fft: int = 256,
     neg_ratio: int = 2
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Extracts high-resolution EEG windows and their low-resolution STFT context for Arousals."""
+    """
+    Extracts high-resolution EEG windows and their low-resolution STFT context for Arousals.
+
+    ``signals`` may be either the raw (n_channels, n_samples) recording or the
+    band-filtered (n_channels, n_bands, n_samples) recording -- the time axis is
+    always assumed to be the last one.
+    """
     win_samp = (pre_sec + post_sec) * fs
     ctx_samp = ctx_sec * fs
     
@@ -77,7 +76,7 @@ def extract_arousal_windows(
         
         if (start_samp - ctx_samp) >= 0 and end_samp <= len(arousals):
             if not np.any(arousals[start_samp:end_samp] == -1): # No artifacts
-                out_signals.append(signals[:, start_samp:end_samp])
+                out_signals.append(signals[..., start_samp:end_samp])
                 out_contexts.append(_get_historical_context(full_spectral_timeline, start_samp, hop_len, required_ctx_steps))
                 out_labels.append(1)
                 valid_pos_count += 1
@@ -95,7 +94,7 @@ def extract_arousal_windows(
         if start_samp - safe_margin >= 0 and end_samp + safe_margin < len(arousals):
             # Ensure the window AND the surrounding buffer are purely 0
             if np.all(arousals[start_samp - safe_margin : end_samp + safe_margin] == 0):
-                out_signals.append(signals[:, start_samp:end_samp])
+                out_signals.append(signals[..., start_samp:end_samp])
                 out_contexts.append(_get_historical_context(full_spectral_timeline, start_samp, hop_len, required_ctx_steps))
                 out_labels.append(0)
                 extracted_negatives += 1
@@ -108,13 +107,19 @@ def extract_arousal_windows(
 
 
 def extract_sleep_stage_windows(
-    full_spectral_timeline: np.ndarray, 
-    sleep_stages: dict, 
-    fs: int, 
-    hop_length: int, 
+    band_signals: np.ndarray,
+    sleep_stages: dict,
+    fs: int,
     win_sec: int = 30
 ) -> tuple[list, list]:
-    """Extracts consecutive [Past, Current, Future] context windows for sleep staging."""
+    """
+    Extracts consecutive [Past, Current] raw signal windows for sleep staging.
+
+    ``band_signals`` is the band-filtered (n_channels, n_bands, n_samples)
+    recording -- the time axis is always assumed to be the last one. Each
+    returned window is a contiguous [Past 30s, Current 30s] slice (shape
+    (..., 2 * win_sec * fs)) ready to be spike-encoded with BSA.
+    """
     win_samp = win_sec * fs
     all_features, all_labels = [], []
     
@@ -126,12 +131,12 @@ def extract_sleep_stage_windows(
         for on, off in blocks:
             # Step by win_samp to avoid overlapping the target windows
             for start_samp in range(on + win_samp, off - (2 * win_samp) + 1, win_samp):
-                context_doublet = _get_doublet_context(full_spectral_timeline, start_samp, win_samp, hop_length)
+                signal_doublet = _get_signal_doublet(band_signals, start_samp, win_samp)
                 
-                all_features.append(context_doublet)
+                all_features.append(signal_doublet)
                 all_labels.append(stage_int)
                 
     return {
-        "sleep_features": np.array(all_features, dtype=np.float32),
+        "sleep_windows": all_features,
         "labels": np.array(all_labels, dtype=np.int32)
     }

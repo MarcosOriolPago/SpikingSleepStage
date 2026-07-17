@@ -5,6 +5,7 @@ torchaudio --index-url https://download.pytorch.org/whl/cu124
 scikit-learn
 numpy
 matplotlib
+seaborn
 scipy
 tqdm
 h5py
